@@ -6,19 +6,17 @@ on:
 jobs:
   run-server:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360 # Maksimal 6 jam per sesi
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. Konfigurasi Git Identity untuk Auto Commit Backup
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 2. Auto Restore Data dari Sesi Sebelumnya (jika foldernya ada di repo)
       - name: Restore Data from Previous Session
         run: |
           if [ -d "ptero-data/var" ]; then
@@ -30,7 +28,6 @@ jobs:
             echo "Belum ada data sebelumnya, mulai bersih."
           fi
 
-      # 3. Setup Docker & Jalankan Pterodactyl
       - name: Deploy Pterodactyl Panel
         run: |
           sudo mkdir -p /opt/pterodactyl
@@ -58,9 +55,24 @@ jobs:
                 - pterodactyl
           EOF
 
+          # Jalankan container dan tunggu sampai benar-benar UP
           sudo docker compose up -d
 
-      # 4. Jalankan Cloudflare Quick Tunnel
+      # 1. Tunggu Docker benar-benar siap merespons di port 80 (Maksimal 2 menit)
+      - name: Wait for Panel to be Ready
+        run: |
+          echo "Menunggu Docker Pterodactyl siap..."
+          for i in {1..24}; do
+            if curl -s http://localhost:80 > /dev/null; then
+              echo "Panel Pterodactyl sudah aktif di port 80!"
+              exit 0
+            fi
+            echo "Percobaan ke-$i: Panel belum siap, tunggu 5 detik..."
+            sleep 5
+          echo "Peringatan: Panel agak lama merespons, tapi kita lanjut jalankan tunnel..."
+          done
+
+      # 2. Jalankan Cloudflare Quick Tunnel setelah aplikasi siap
       - name: Start Cloudflare Quick Tunnel
         run: |
           curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -68,7 +80,6 @@ jobs:
           ./cloudflared tunnel --url http://localhost:80 > cf_log.txt 2>&1 &
           sleep 5
 
-      # 5. Tampilkan Link Akses Web
       - name: Show Public Access Link
         run: |
           echo "===================================================="
@@ -77,34 +88,24 @@ jobs:
           cat cf_log.txt | grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com"
           echo "===================================================="
 
-      # 6. Skrip Auto Backup Berkala & Saat Sesi Mau Habis
       - name: Run Background Auto-Backup Daemon
         run: |
-          # Buat skrip backup yang berjalan di background setiap 30 menit
           cat << 'EOF' > /tmp/auto_backup.sh
           while true; do
-            sleep 1800 # Setiap 30 menit
-            echo "[$(date)] Melakukan auto-backup data ke git..."
-            
-            # Ambil data dari direktori docker ke folder lokal repo
+            sleep 1800
             mkdir -p ptero-data
             sudo cp -r /opt/pterodactyl/panel/* ptero-data/ 2>/dev/null || true
             sudo chown -R $USER:$USER ptero-data/
-            
             git add ptero-data/
             git commit -m "Auto-backup: $(date +'%Y-%m-%d %H:%M:%S')" || true
             git push origin HEAD:${{ github.ref_name }} || true
           done
           EOF
-          
           chmod +x /tmp/auto_backup.sh
           nohup /tmp/auto_backup.sh > /dev/null 2>&1 &
-          echo "Auto-backup daemon aktif di background!"
 
-          # Menjaga server tetap hidup, dan melakukan backup terakhir pas mau timeout (mendekati 6 jam)
-          # Mengatur tidur bertahap agar aman
           for i in {1..35}; do
-            sleep 600 # Tidur per 10 menit (total 350 menit, sisa waktu untuk backup akhir)
+            sleep 600
           done
 
           echo "Sesi hampir habis, melakukan backup final..."
@@ -114,4 +115,3 @@ jobs:
           git add ptero-data/
           git commit -m "Final backup sebelum sesi mati: $(date +'%Y-%m-%d %H:%M:%S')" || true
           git push origin HEAD:${{ github.ref_name }} || true
-          echo "Backup final selesai!"
