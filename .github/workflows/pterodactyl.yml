@@ -1,25 +1,39 @@
-name: Pterodactyl Panel + Auto Cloudflare Tunnel
+name: Pterodactyl Auto Backup & Persistent
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-pterodactyl:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360 # Maksimal 6 jam per jalannya workflow (batas free tier GitHub)
+  run-server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # Maksimal 6 jam per sesi
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. Setup Docker (Dibutuhkan oleh Pterodactyl Panel/Wings)
-      - name: Set up Docker
-        uses: docker/setup-docker-action@v3
+      # 1. Konfigurasi Git Identity untuk Auto Commit Backup
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 2. Deploy Pterodactyl Panel via Docker Compose
+      # 2. Auto Restore Data dari Sesi Sebelumnya (jika foldernya ada di repo)
+      - name: Restore Data from Previous Session
+        run: |
+          if [ -d "ptero-data/var" ]; then
+            echo "Memulihkan data lama..."
+            sudo mkdir -p /opt/pterodactyl/panel
+            sudo cp -r ptero-data/* /opt/pterodactyl/panel/
+            echo "Data berhasil dipulihkan!"
+          else
+            echo "Belum ada data sebelumnya, mulai bersih."
+          fi
+
+      # 3. Setup Docker & Jalankan Pterodactyl
       - name: Deploy Pterodactyl Panel
         run: |
-          mkdir -p /opt/pterodactyl
+          sudo mkdir -p /opt/pterodactyl
           cd /opt/pterodactyl
 
           cat << 'EOF' > docker-compose.yml
@@ -44,32 +58,60 @@ jobs:
                 - pterodactyl
           EOF
 
-          docker compose up -d
+          sudo docker compose up -d
 
-      # 3. Download & Jalankan Cloudflare Tunnel Secara Otomatis
+      # 4. Jalankan Cloudflare Quick Tunnel
       - name: Start Cloudflare Quick Tunnel
         run: |
-          echo "Mengunduh cloudflared..."
           curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
-          
-          echo "Menjalankan tunnel ke port 80..."
-          # Jalankan di background dan simpan output log-nya untuk diambil link-nya nanti
           ./cloudflared tunnel --url http://localhost:80 > cf_log.txt 2>&1 &
-          
-          # Tunggu beberapa detik agar tunnel siap dan link ter-generate
           sleep 5
 
-      # 4. Ambil dan Tampilkan Link Akses Web
+      # 5. Tampilkan Link Akses Web
       - name: Show Public Access Link
         run: |
           echo "===================================================="
-          echo " PTERODACTYL PANEL BERHASIL ONLINE!"
+          echo " PTERODACTYL PANEL (UBUNTU 24.04) ONLINE!"
           echo "===================================================="
-          echo "Cari link Cloudflare Tunnel di bawah ini:"
           cat cf_log.txt | grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com"
           echo "===================================================="
-          echo "Catatan: Jangan tutup tab GitHub Actions ini agar server tetap menyala."
+
+      # 6. Skrip Auto Backup Berkala & Saat Sesi Mau Habis
+      - name: Run Background Auto-Backup Daemon
+        run: |
+          # Buat skrip backup yang berjalan di background setiap 30 menit
+          cat << 'EOF' > /tmp/auto_backup.sh
+          while true; do
+            sleep 1800 # Setiap 30 menit
+            echo "[$(date)] Melakukan auto-backup data ke git..."
+            
+            # Ambil data dari direktori docker ke folder lokal repo
+            mkdir -p ptero-data
+            sudo cp -r /opt/pterodactyl/panel/* ptero-data/ 2>/dev/null || true
+            sudo chown -R $USER:$USER ptero-data/
+            
+            git add ptero-data/
+            git commit -m "Auto-backup: $(date +'%Y-%m-%d %H:%M:%S')" || true
+            git push origin HEAD:${{ github.ref_name }} || true
+          done
+          EOF
           
-          # Menjaga workflow agar terus hidup sampai timeout
-          sleep infinity
+          chmod +x /tmp/auto_backup.sh
+          nohup /tmp/auto_backup.sh > /dev/null 2>&1 &
+          echo "Auto-backup daemon aktif di background!"
+
+          # Menjaga server tetap hidup, dan melakukan backup terakhir pas mau timeout (mendekati 6 jam)
+          # Mengatur tidur bertahap agar aman
+          for i in {1..35}; do
+            sleep 600 # Tidur per 10 menit (total 350 menit, sisa waktu untuk backup akhir)
+          done
+
+          echo "Sesi hampir habis, melakukan backup final..."
+          mkdir -p ptero-data
+          sudo cp -r /opt/pterodactyl/panel/* ptero-data/ || true
+          sudo chown -R $USER:$USER ptero-data/
+          git add ptero-data/
+          git commit -m "Final backup sebelum sesi mati: $(date +'%Y-%m-%d %H:%M:%S')" || true
+          git push origin HEAD:${{ github.ref_name }} || true
+          echo "Backup final selesai!"
