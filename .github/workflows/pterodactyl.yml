@@ -1,0 +1,75 @@
+name: Pterodactyl Panel + Auto Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-pterodactyl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Maksimal 6 jam per jalannya workflow (batas free tier GitHub)
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Setup Docker (Dibutuhkan oleh Pterodactyl Panel/Wings)
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v3
+
+      # 2. Deploy Pterodactyl Panel via Docker Compose
+      - name: Deploy Pterodactyl Panel
+        run: |
+          mkdir -p /opt/pterodactyl
+          cd /opt/pterodactyl
+
+          cat << 'EOF' > docker-compose.yml
+          version: '3.8'
+          networks:
+            pterodactyl:
+              driver: bridge
+          services:
+            panel:
+              image: ghcr.io/pterodactyl/panel:latest
+              container_name: pterodactyl-panel
+              restart: always
+              ports:
+                - "80:80"
+              environment:
+                - APP_ENV=production
+                - APP_TIMEZONE=Asia/Jakarta
+              volumes:
+                - /opt/pterodactyl/panel/var/:/app/var/
+                - /opt/pterodactyl/panel/storage/:/app/storage/
+              networks:
+                - pterodactyl
+          EOF
+
+          docker compose up -d
+
+      # 3. Download & Jalankan Cloudflare Tunnel Secara Otomatis
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          echo "Mengunduh cloudflared..."
+          curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          
+          echo "Menjalankan tunnel ke port 80..."
+          # Jalankan di background dan simpan output log-nya untuk diambil link-nya nanti
+          ./cloudflared tunnel --url http://localhost:80 > cf_log.txt 2>&1 &
+          
+          # Tunggu beberapa detik agar tunnel siap dan link ter-generate
+          sleep 5
+
+      # 4. Ambil dan Tampilkan Link Akses Web
+      - name: Show Public Access Link
+        run: |
+          echo "===================================================="
+          echo " PTERODACTYL PANEL BERHASIL ONLINE!"
+          echo "===================================================="
+          echo "Cari link Cloudflare Tunnel di bawah ini:"
+          cat cf_log.txt | grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com"
+          echo "===================================================="
+          echo "Catatan: Jangan tutup tab GitHub Actions ini agar server tetap menyala."
+          
+          # Menjaga workflow agar terus hidup sampai timeout
+          sleep infinity
